@@ -21,9 +21,12 @@ def main() -> None:
     ap.add_argument("--event", default="", help='HLTV event name/slug, e.g. "blast-open-porto-2026"')
     ap.add_argument("--maps", default="", help='map filter, English or Chinese, comma separated, e.g. "炼狱小镇" or "Mirage,Nuke"')
     ap.add_argument("--latest", type=int, default=0, help="keep only the N most recent matching matches (0 = all)")
-    ap.add_argument("--keep-rars", action="store_true", help="keep downloaded archives after extraction")
+    ap.add_argument(
+        "--keep-rars", action=argparse.BooleanOptionalAction, default=True,
+        help="keep downloaded archives after extraction (default: keep; use --no-keep-rars to delete safely)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="resolve and report the plan without downloading")
-    ap.add_argument("--csgo-dir", default="", help="override CS2 game/csgo directory")
+    ap.add_argument("--csgo-dir", default="", help="override the Counter-Strike Global Offensive root")
     args = ap.parse_args()
 
     result = asyncio.run(run(

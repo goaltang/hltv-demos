@@ -1,17 +1,18 @@
 # hltv-demos
 
-Download CS2 GOTV demos (`.dem`) from HLTV by event and map, and install them
-into your CS2 `game/csgo` directory — ready for `playdemo`.
+Download CS2 GOTV demos (`.dem`) from HLTV by event and map, then install them
+into the CS2 `game/csgo` directory, ready for `playdemo`.
 
 ## Features
 
-- Finds the HLTV event page from a name/slug via site search
-- Only downloads demos of maps that were **actually played** (listed-but-vetoed maps are skipped)
-- Cloudflare-safe downloads (`curl_cffi` Chrome impersonation; plain requests/curl get 403)
-- Resumable: interrupted downloads continue with HTTP Range (`.part` files)
-- Dedup via a local manifest — repeat calls skip already-downloaded archives
-- Map names in **English or Chinese** (荒漠迷城=Mirage, 炼狱小镇=Inferno, 核子危机=Nuke, 炙热沙城II=Dust2, 远古遗迹=Ancient, 阿努比斯=Anubis, ...)
-- Auto-discovers CS2 in Steam libraries (`/mnt/*`), or set `HLTV_DEMOS_CSGO_DIR`
+- Finds an HLTV event from its name or slug.
+- Downloads only maps that were **actually played**, not vetoed maps.
+- Uses `curl_cffi` Chrome impersonation for Cloudflare-protected downloads.
+- Resumes interrupted downloads with validated HTTP Range responses.
+- Uses a manifest to skip requested demos that are already installed.
+- Supports English and Chinese map names.
+- Extracts to a temporary directory, validates output, then installs atomically.
+- Tests archive integrity before extraction or optional deletion.
 
 ## Install
 
@@ -25,32 +26,61 @@ hltv_demos --help
 ## Usage
 
 ```bash
-# plan only (shows matches, played maps, demo sizes)
+# Plan only. This does not require a local CS2 installation.
 hltv_demos --event blast-open-porto-2026 --maps Mirage,Inferno --dry-run
 
-# latest 3 matches on Inferno, extract demos into the CS2 dir
+# Extract Inferno from the latest three matching matches.
 hltv_demos --event blast-open-porto-2026 --maps 炼狱小镇 --latest 3
 
-# all matching matches, all maps
-hltv_demos --event major-championship --maps ""
+# Extract every .dem from the latest three matches.
+hltv_demos --event blast-open-porto-2026 --latest 3
+
+# Delete each archive only after all requested demos pass validation.
+hltv_demos --event blast-open-porto-2026 --maps Mirage --no-keep-rars
 ```
 
-It prints `playdemo` commands for each extracted demo, e.g.:
+The JSON result includes ready commands such as:
 
-```
-playdemo "/mnt/.../game/csgo/blast-open-porto-2026-team1-team2-mirage.dem"
+```text
+playdemo "match-name-mirage"
 ```
 
 ## Python API
 
 ```python
+import asyncio
 from hltv_demos import run
-result = asyncio.run(run(event="blast-open-porto-2026", maps="炼狱小镇", latest=3))
+
+result = asyncio.run(run(
+    event="blast-open-porto-2026",
+    maps="炼狱小镇",
+    latest=3,
+))
 ```
 
-## Notes
+`run()` moves blocking HTTP, file and 7-Zip work to a worker thread, so awaiting
+it does not block the caller's event loop.
 
-- `latest=0` means all matching matches; archives are deleted after extraction unless `--keep-rars`
-- No HLTV login needed as of 2025-09; if HLTV starts requiring login the tool fails with a clear message
-- `7zz` is auto-downloaded to the tools folder if missing
-- Downloads large archives one by one; prefer `--dry-run` first for big events
+## Safety and behavior
+
+- `latest=0` means all matching matches.
+- Empty `maps` means all `.dem` members in each selected archive. A real run
+  with both empty `maps` and `latest=0` is refused to prevent an accidental
+  event-wide download. `dry_run=True` is always allowed.
+- Archives are kept by default. Pass `--no-keep-rars` or
+  `keep_rars=False` to delete them after successful validation and extraction.
+- An existing demo with an unexpected size is preserved and reported as a
+  conflict. It is never silently overwritten.
+- Archive reuse is tied to the same HLTV demo ID. Unrelated archives are never
+  adopted merely because their byte sizes match.
+- `csgo_dir` and `HLTV_DEMOS_CSGO_DIR` specify the
+  `Counter-Strike Global Offensive` root. The tool appends `game/csgo`.
+- The download directory can be overridden with `HLTV_DEMOS_DL_DIR`.
+- The manifest is stored at `~/tools/hltv-demos/manifest.json`.
+- `7zz` is downloaded into `~/tools/hltv-demos/` if it is unavailable.
+
+## Tests
+
+```bash
+uv run python -m unittest discover -v
+```

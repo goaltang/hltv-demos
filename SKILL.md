@@ -26,20 +26,24 @@ Shell form (same args): `hltv_demos --event ... --maps ... --latest 3 --dry-run`
 4. Downloads (curl_cffi `impersonate="chrome"` — requests/cloudscraper get 403;
    plain curl gets 403 even on the final R2 URL), with `.part` Range resume and
    byte-size validation. Interrupted calls: just call again, it continues.
-5. Extracts only the wanted maps' `.dem` files into the CS2 dir and returns
-   ready `playdemo` commands.
+5. Tests the archive, extracts wanted `.dem` files through a temporary
+   directory, validates their sizes, and atomically installs them into CS2.
+6. Uses the manifest to skip verified demos even if their archive was deleted,
+   and returns ready `playdemo` commands.
 
 ## Notes
 
 - `maps` accepts English or Chinese names (荒漠迷城=Mirage, 炼狱小镇=Inferno,
   核子危机=Nuke, 炙热沙城II=Dust2, 远古遗迹=Ancient, 阿努比斯=Anubis, ...),
   comma-separated.
-- `latest=0` means all matching matches; `keep_rars=False` deletes archives
-  after extraction (adopted foreign-name archives are never deleted).
-- CS2 dir is auto-discovered (Steam libraries on /mnt/*); override with
-  `csgo_dir=...` or env `HLTV_DEMOS_CSGO_DIR`.
+- `latest=0` means all matching matches. Empty `maps` means all demos, but a
+  real run with empty `maps` and `latest=0` is refused. Archives are kept by
+  default; `keep_rars=False` deletes them only after validated extraction.
+- CS2 is auto-discovered (Steam libraries on `/mnt/*`); override with the
+  game root via `csgo_dir=...` or `HLTV_DEMOS_CSGO_DIR`. A dry run does not
+  require CS2 to be installed.
 - A manifest at `~/tools/hltv-demos/manifest.json` remembers downloaded
   archives and extracted maps so repeat calls skip re-downloading.
-- Downloads run inline in the calling cell; for big batches prefer `dry_run`
+- Blocking work runs in a worker thread; for big batches prefer `dry_run`
   first, then call per map. `7zz` is auto-downloaded to `~/tools/hltv-demos/`
   if missing.
