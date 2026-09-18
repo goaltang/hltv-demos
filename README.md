@@ -141,6 +141,15 @@ not a normal Python callable.
 - Manifest entries skip verified demos without adopting unrelated same-size
   archives.
 
+## Roadmap
+
+- v0.3.2: end-to-end validation, manifest locking, and real-client tests.
+- v0.4.0: native Windows and Steam library discovery.
+- v0.5.0: interactive beginner workflow and demo management.
+- v0.6.0: PyPI, provenance, and Agent marketplace distribution.
+
+See [ROADMAP.md](ROADMAP.md) for priorities, completion criteria, and non-goals.
+
 ## Development
 
 ```bash

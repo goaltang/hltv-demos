@@ -76,6 +76,16 @@ MCP 提供环境检查、只读计划和执行已批准计划三个工具。执�
 普通豆包桌面端/网页端目前没有公开的任意 `SKILL.md` 或本地 MCP 导入方式。
 字节系编程场景请使用 **TRAE/TraeCode**，不要把普通豆包当成本地编码 Agent。
 
+## 后续路线
+
+- v0.3.2：真实端到端验证、manifest 并发锁和真实 Agent 客户端测试。
+- v0.4.0：原生 Windows 和 Steam 库发现。
+- v0.5.0：新手交互流程和录像管理。
+- v0.6.0：PyPI、发布来源证明和 Agent 市场分发。
+
+详细优先级、完成标准和明确不做的内容见
+[ROADMAP.zh-CN.md](ROADMAP.zh-CN.md)。
+
 ## 常见问题
 
 - 运行 `./scripts/doctor` 检查系统、CS2 路径和 7-Zip。
