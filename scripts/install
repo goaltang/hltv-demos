@@ -8,15 +8,17 @@ DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 DATA_ROOT="$DATA_HOME/hltv-demos"
 AGENTS=()
 BIN_LINK=1
+WITH_MCP=0
 LOCK=""
 RELEASE=""
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/install [--agent NAME]... [--prefix ABSOLUTE_PATH] [--no-bin-link]
+Usage: ./scripts/install [--agent NAME]... [--prefix ABSOLUTE_PATH] [--with-mcp] [--no-bin-link]
 
-NAME: auto, all, prime, claude, codex, cursor, gemini.
+NAME: auto, all, prime, claude, codex, cursor, gemini, qoder, trae.
 The default is auto, which selects already detected Agent installations.
+Use --with-mcp only when installing the WorkBuddy MCP adapter.
 EOF
 }
 cleanup() {
@@ -28,11 +30,13 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 
 while (($#)); do
   case "$1" in
     --agent) [[ $# -ge 2 ]] || { printf '%s\n' '--agent needs a value' >&2; exit 2; }; AGENTS+=("$2"); shift 2 ;;
     --prefix) [[ $# -ge 2 ]] || { printf '%s\n' '--prefix needs a value' >&2; exit 2; }; DATA_ROOT="$2"; shift 2 ;;
+    --with-mcp) WITH_MCP=1; shift ;;
     --no-bin-link) BIN_LINK=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -49,7 +53,8 @@ mkdir -p -- "$DATA_ROOT/releases"
 LOCK="$DATA_ROOT/.install.lock"
 mkdir -- "$LOCK" 2>/dev/null || { printf 'Another install is active: %s\n' "$LOCK" >&2; exit 1; }
 
-release_id="0.3.0-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+package_version="$(python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); print(re.search(r"^version = \"([^\"]+)\"", text, re.M).group(1))' "$ROOT/pyproject.toml")"
+release_id="$package_version-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RELEASE="$DATA_ROOT/releases/$release_id"
 SKILL_COPY="$RELEASE/skill"
 VENV="$RELEASE/venv"
@@ -63,15 +68,21 @@ def ignore(_path, names):
 shutil.copytree(source, destination, ignore=ignore)
 PY
 
+package_spec="$SKILL_COPY"
+((WITH_MCP)) && package_spec="$SKILL_COPY[mcp]"
 if command -v uv >/dev/null; then
+  export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"
   uv venv "$VENV"
-  uv pip install --python "$VENV/bin/python" "$SKILL_COPY"
+  uv pip install --python "$VENV/bin/python" "$package_spec"
 else
   python3 -m venv "$VENV"
   "$VENV/bin/python" -m pip install --upgrade pip
-  "$VENV/bin/python" -m pip install "$SKILL_COPY"
+  "$VENV/bin/python" -m pip install "$package_spec"
 fi
 "$VENV/bin/hltv_demos" --help >/dev/null
+if ((WITH_MCP)); then
+  "$VENV/bin/python" -c 'import hltv_demos.mcp_server' >/dev/null
+fi
 [[ -f "$SKILL_COPY/SKILL.md" ]] || { printf '%s\n' 'Install validation failed: SKILL.md missing.' >&2; exit 1; }
 
 next="$DATA_ROOT/.current.new.$$"
@@ -86,6 +97,8 @@ agent_root() {
     codex) printf '%s\n' "$HOME/.agents/skills" ;;
     cursor) printf '%s\n' "$HOME/.cursor/skills" ;;
     gemini) printf '%s\n' "$HOME/.gemini/skills" ;;
+    qoder) printf '%s\n' "$HOME/.qoder/skills" ;;
+    trae) printf '%s\n' "$HOME/.trae/skills" ;;
     *) return 1 ;;
   esac
 }
@@ -96,19 +109,21 @@ agent_detected() {
     codex) [[ -d "$HOME/.codex" || -d "$HOME/.agents" ]] || command -v codex >/dev/null ;;
     cursor) [[ -d "$HOME/.cursor" ]] || command -v cursor >/dev/null ;;
     gemini) [[ -d "$HOME/.gemini" ]] || command -v gemini >/dev/null ;;
+    qoder) [[ -d "$HOME/.qoder" ]] || command -v qoder >/dev/null ;;
+    trae) [[ -d "$HOME/.trae" ]] || command -v trae >/dev/null ;;
   esac
 }
 
 selected=()
 for requested in "${AGENTS[@]}"; do
   case "$requested" in
-    all) selected+=(prime claude codex cursor gemini) ;;
+    all) selected+=(prime claude codex cursor gemini qoder trae) ;;
     auto)
-      for candidate in prime claude codex cursor gemini; do
+      for candidate in prime claude codex cursor gemini qoder trae; do
         agent_detected "$candidate" && selected+=("$candidate") || true
       done
       ;;
-    prime|claude|codex|cursor|gemini) selected+=("$requested") ;;
+    prime|claude|codex|cursor|gemini|qoder|trae) selected+=("$requested") ;;
     *) printf 'Unknown agent: %s\n' "$requested" >&2; exit 2 ;;
   esac
 done
@@ -142,17 +157,23 @@ done
 
 if ((BIN_LINK)); then
   bin_dir="$HOME/.local/bin"
-  bin_dest="$bin_dir/hltv-demos"
   mkdir -p -- "$bin_dir"
-  if [[ ! -e "$bin_dest" && ! -L "$bin_dest" ]]; then
-    ln -s -- "$DATA_ROOT/current/skill/scripts/hltv-demos" "$bin_dest"
-    printf 'Command linked: %s\n' "$bin_dest"
-  elif [[ "$(readlink -f -- "$bin_dest" 2>/dev/null || true)" != "$DATA_ROOT"/releases/*/skill/scripts/hltv-demos ]]; then
-    printf 'Command path already exists; kept unchanged: %s\n' "$bin_dest" >&2
-  fi
+  command_names=(hltv-demos)
+  ((WITH_MCP)) && command_names+=(hltv-demos-mcp)
+  for command_name in "${command_names[@]}"; do
+    bin_dest="$bin_dir/$command_name"
+    source_path="$DATA_ROOT/current/skill/scripts/$command_name"
+    if [[ ! -e "$bin_dest" && ! -L "$bin_dest" ]]; then
+      ln -s -- "$source_path" "$bin_dest"
+      printf 'Command linked: %s\n' "$bin_dest"
+    elif [[ "$(readlink -f -- "$bin_dest" 2>/dev/null || true)" != "$DATA_ROOT"/releases/*/skill/scripts/"$command_name" ]]; then
+      printf 'Command path already exists; kept unchanged: %s\n' "$bin_dest" >&2
+    fi
+  done
 fi
 
 printf 'Installed runtime: %s/current\n' "$DATA_ROOT"
+((WITH_MCP)) && printf '%s\n' 'WorkBuddy MCP adapter: installed'
 printf 'Run diagnostics: %s/current/skill/scripts/doctor\n' "$DATA_ROOT"
 if ((linked == 0)); then
   printf '%s\n' 'No Agent was detected. Re-run with --agent claude (or another Agent).'

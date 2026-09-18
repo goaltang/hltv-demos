@@ -20,8 +20,9 @@ From the directory containing this `SKILL.md`:
 ./scripts/doctor
 ```
 
-The installer creates an isolated environment under
-`~/.local/share/hltv-demos/` and can link this skill into detected Agent skill
+The installer creates versioned isolated environments under
+`~/.local/share/hltv-demos/` and supports Prime, Claude, Codex, Cursor, Gemini,
+Qoder, and TRAE skill roots. It can link this skill into detected Agent skill
 directories. It installs Python dependencies. On first extraction, the tool may
 download the official Linux x86-64 `7zz`; its SHA-256 is pinned and verified
 before execution. Tell the user about these changes before running the installer.
@@ -32,7 +33,9 @@ before execution. Tell the user about these changes before running the installer
 2. Run a dry plan and show the result to the user:
 
 ```bash
-./scripts/hltv-demos --event 'https://www.hltv.org/events/1234/event-slug'   --maps 'Mirage,Inferno' --latest 3 --dry-run
+./scripts/hltv-demos \
+  --event 'https://www.hltv.org/events/1234/event-slug' \
+  --maps 'Mirage,Inferno' --latest 3 --dry-run
 ```
 
 3. Confirm the event, matches, estimated size, archive directory, CS2 directory,
@@ -40,7 +43,9 @@ before execution. Tell the user about these changes before running the installer
 4. Only after approval, repeat with `--yes` and without `--dry-run`:
 
 ```bash
-./scripts/hltv-demos --event 'https://www.hltv.org/events/1234/event-slug'   --maps 'Mirage,Inferno' --latest 3 --yes
+./scripts/hltv-demos \
+  --event 'https://www.hltv.org/events/1234/event-slug' \
+  --maps 'Mirage,Inferno' --latest 3 --yes
 ```
 
 Use `--json` when structured output is useful. Progress and diagnostics go to

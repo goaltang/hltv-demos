@@ -15,7 +15,8 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --locked
-      - run: bash -n scripts/install scripts/hltv-demos scripts/doctor
+      - run: uv sync --locked --extra mcp
+      - run: bash -n scripts/install scripts/hltv-demos scripts/doctor scripts/hltv-demos-mcp scripts/workbuddy-mcp-config
+      - run: uv run ruff check src tests
       - run: uv run python -m unittest discover -v
       - run: uv build

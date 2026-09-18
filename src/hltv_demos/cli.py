@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import traceback
-from typing import Sequence
+from collections.abc import Sequence
 
 from . import doctor, run
 

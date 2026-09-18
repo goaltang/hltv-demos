@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+MCP_COMMAND="$DATA_HOME/hltv-demos/current/skill/scripts/hltv-demos-mcp"
+[[ -x "$MCP_COMMAND" ]] || { printf '%s\n' 'Install hltv-demos first.' >&2; exit 1; }
+MCP_PYTHON="$DATA_HOME/hltv-demos/current/venv/bin/python"
+if [[ ! -x "$MCP_PYTHON" ]] || ! "$MCP_PYTHON" -c 'import mcp' 2>/dev/null; then
+  printf '%s\n' 'MCP support is missing. Re-run ./scripts/install --with-mcp --agent auto.' >&2
+  exit 1
+fi
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  DISTRO="${WSL_DISTRO_NAME:-}"
+  [[ -n "$DISTRO" ]] || { printf '%s\n' 'WSL_DISTRO_NAME is missing.' >&2; exit 1; }
+  python3 -c 'import json,sys; print(json.dumps({"mcpServers":{"hltv-demos":{"command":"wsl.exe","args":["-d",sys.argv[1],"--exec",sys.argv[2]]}}},ensure_ascii=False,indent=2))' "$DISTRO" "$MCP_COMMAND"
+else
+  python3 -c 'import json,sys; print(json.dumps({"mcpServers":{"hltv-demos":{"command":sys.argv[1],"args":[]}}},ensure_ascii=False,indent=2))' "$MCP_COMMAND"
+fi

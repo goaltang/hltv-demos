@@ -9,9 +9,8 @@ from hltv_demos import cli
 
 class CliTests(unittest.TestCase):
     def test_missing_event_is_usage_error(self):
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaisesRegex(SystemExit, "2"):
-                cli.main([])
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(SystemExit, "2"):
+            cli.main([])
 
     @patch.object(cli, "run", new_callable=AsyncMock)
     def test_real_run_requires_yes_before_calling_core(self, run):

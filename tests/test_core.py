@@ -50,14 +50,15 @@ class CoreTests(unittest.TestCase):
 
     @patch.object(hd.cr, "get")
     def test_resume_rejects_wrong_content_range_and_keeps_part(self, get):
-        response = Mock(status_code=206, headers={"content-range": "bytes 0-9/10"})
+        response = Mock(status_code=206, headers={"content-range": "bytes 0-9/10"},
+                        url="https://r2-demos.hltv.org/a.rar")
         response.iter_content.return_value = [b"6789"]
         get.return_value = response
         with tempfile.TemporaryDirectory() as d:
             dest = os.path.join(d, "a.rar")
             Path(dest + ".part").write_bytes(b"12345")
             with self.assertRaisesRegex(RuntimeError, "invalid resume"):
-                hd.download("https://example.invalid/a", 10, dest)
+                hd.download("https://r2-demos.hltv.org/a.rar", 10, dest)
             self.assertEqual(Path(dest + ".part").read_bytes(), b"12345")
 
     @patch.object(hd, "_save_manifest")
@@ -129,11 +130,32 @@ class V03SafetyTests(unittest.TestCase):
                 hd.ensure_7zz()
             self.assertFalse(Path(d, "7zz").exists())
 
+    def test_demo_url_allowlist_rejects_untrusted_hosts(self):
+        self.assertEqual(
+            hd._validate_demo_url("https://r2-demos.hltv.org/a.rar"),
+            "https://r2-demos.hltv.org/a.rar",
+        )
+        for url in ("http://r2-demos.hltv.org/a.rar", "https://evil.test/a.rar",
+                    "https://r2-demos.hltv.org.evil.test/a.rar"):
+            with self.assertRaisesRegex(RuntimeError, "untrusted"):
+                hd._validate_demo_url(url)
+
+    @patch.object(hd.cr, "get")
+    def test_resolve_demo_rejects_unsafe_redirect_and_filename(self, get):
+        get.return_value = Mock(headers={"location": "https://evil.test/a.rar"}, close=Mock())
+        with self.assertRaisesRegex(RuntimeError, "untrusted"):
+            hd.resolve_demo("/download/demo/1")
+        get.return_value = Mock(
+            headers={"location": "https://r2-demos.hltv.org/bad%2fname.rar"}, close=Mock()
+        )
+        with self.assertRaisesRegex(RuntimeError, "unsafe"):
+            hd.resolve_demo("/download/demo/1")
+
     def test_disk_guard_reports_shortage(self):
         usage = Mock(free=100)
-        with patch.object(hd.shutil, "disk_usage", return_value=usage):
-            with self.assertRaisesRegex(RuntimeError, "not enough free space"):
-                hd._require_space("/tmp", 101, "test")
+        with patch.object(hd.shutil, "disk_usage", return_value=usage), \
+                self.assertRaisesRegex(RuntimeError, "not enough free space"):
+            hd._require_space("/tmp", 101, "test")
 
 
 if __name__ == "__main__":

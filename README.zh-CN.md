@@ -1,14 +1,11 @@
 # hltv-demos
 
-从 HLTV 查找、下载、校验并安装 CS2 GOTV demo。
+安全地查找、下载、校验并安装 HLTV CS2 GOTV demo。
 
 ## 支持范围
 
-v0.3 支持 **Linux x86-64** 和 **Windows WSL2**，需要 Python 3.10 以上。
+v0.3.1 支持 **Linux x86-64** 和 **Windows WSL2**，需要 Python 3.10 以上。
 目前不自动支持原生 Windows、macOS 和 Linux ARM。
-
-工具需要访问外网，并写入 CS2 的 `game/csgo` 目录。默认把压缩包保存在
-`~/Downloads`，状态文件和经过校验的 `7zz` 保存在 `~/tools/hltv-demos`。
 
 ## 新手安装
 
@@ -22,23 +19,35 @@ cd hltv-demos
 也可以指定 Agent：
 
 ```bash
-./scripts/install --agent claude
-./scripts/install --agent codex
-./scripts/install --agent cursor
+./scripts/install --agent qoder
+./scripts/install --agent trae
+./scripts/install --agent claude --agent cursor
+./scripts/install --agent all
 ```
 
-安装器会在 `~/.local/share/hltv-demos/venv` 创建独立环境，不会覆盖已经
-存在的 Skill 目录。
+| Agent | 用户级 Skill 目录 |
+|---|---|
+| Prime Agent | `~/.prime/agent/skills/` |
+| Claude Code | `~/.claude/skills/` |
+| OpenAI Codex | `~/.agents/skills/` |
+| Cursor | `~/.cursor/skills/` |
+| Gemini CLI | `~/.gemini/skills/` |
+| Qoder | `~/.qoder/skills/` |
+| TRAE / TraeCode | `~/.trae/skills/` |
 
-## 安全使用流程
+TRAE 也会读取共享的 `~/.agents/skills/`。安装器会在
+`~/.local/share/hltv-demos/releases/` 创建版本化独立环境，并通过
+`current` 原子切换版本。它不会覆盖无关的已有 Skill。
 
-先查看计划，不会下载录像：
+## 安全使用
+
+先查看计划，不下载录像：
 
 ```bash
 ./scripts/hltv-demos   --event '完整的 HLTV 赛事网址'   --maps '荒漠迷城,炼狱小镇' --latest 3 --dry-run
 ```
 
-确认赛事、比赛、预计大小和目录都正确后，再执行：
+确认赛事、比赛、大小和目录后再执行：
 
 ```bash
 ./scripts/hltv-demos   --event '完整的 HLTV 赛事网址'   --maps '荒漠迷城,炼狱小镇' --latest 3 --yes
@@ -47,17 +56,37 @@ cd hltv-demos
 真实下载必须提供 `--yes`。默认保留压缩包；只有明确需要时才使用
 `--no-keep-rars`。
 
+## WorkBuddy
+
+WorkBuddy 使用自己的 `skill.yml`，不能直接安装本项目的 `SKILL.md`。
+本项目为它提供了本地 stdio MCP 适配器。在 WSL2 内单独安装 MCP 依赖后运行：
+
+```bash
+./scripts/install --with-mcp --agent auto
+./scripts/workbuddy-mcp-config > workbuddy-hltv-mcp.json
+```
+
+把生成的 `mcpServers.hltv-demos` 配置合并到 WorkBuddy 的
+`~/.workbuddy/mcp.json`。保持默认/手动审批模式，不要为了省事开启 Full Access。
+
+MCP 提供环境检查、只读计划和执行已批准计划三个工具。执行令牌十分钟后
+失效且只能使用一次；执行内容固定为用户看到的比赛、URL、大小和目录，
+不会在执行时重新搜索并替换比赛。
+
+普通豆包桌面端/网页端目前没有公开的任意 `SKILL.md` 或本地 MCP 导入方式。
+字节系编程场景请使用 **TRAE/TraeCode**，不要把普通豆包当成本地编码 Agent。
+
 ## 常见问题
 
 - 运行 `./scripts/doctor` 检查系统、CS2 路径和 7-Zip。
-- `--csgo-dir` 可以填写游戏根目录，也可以直接填写 `game/csgo`。
-- `--download-dir` 可以更改压缩包目录。
-- 如果赛事名称有歧义，工具会停止并显示候选项，不会自行猜测。
+- `--csgo-dir` 可填写游戏根目录或最终的 `game/csgo`。
+- `--download-dir` 可更改压缩包目录。
+- 模糊赛事会停止并显示候选项，不会自动猜测。
 - 下载中断后再次运行相同命令，会从 `.part` 文件继续。
 - 工具不会覆盖大小异常的已有 demo。
-- 首次需要 7-Zip 时，只会执行 SHA-256 校验通过的官方 Linux x64 文件。
+- 首次需要 7-Zip 时，只执行 SHA-256 校验通过的官方 Linux x64 文件。
 
-更完整的技术说明参见 [README.md](README.md)。
+完整技术说明参见 [README.md](README.md)。
 
 ## 许可证
 

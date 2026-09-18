@@ -19,8 +19,9 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Callable
 from urllib.parse import quote_plus, urlparse
 
 from bs4 import BeautifulSoup
@@ -80,11 +81,25 @@ def _get(url: str, stream: bool = False, headers: dict | None = None, timeout=30
     raise RuntimeError(f"GET failed after {tries} tries ({last}): {url}")
 
 
+def _validate_demo_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname != "r2-demos.hltv.org":
+        raise RuntimeError(f"untrusted demo download URL: {parsed.scheme}://{parsed.hostname or '?'}")
+    return url
+
+
 def _head_size(url: str) -> int:
+    _validate_demo_url(url)
     try:
-        h = cr.head(url, impersonate="chrome", timeout=30)
-        return int(h.headers.get("content-length") or 0)
-    except Exception:
+        h = cr.head(url, impersonate="chrome", timeout=30, allow_redirects=False)
+        try:
+            if h.status_code != 200:
+                return 0
+            _validate_demo_url(str(h.url))
+            return int(h.headers.get("content-length") or 0)
+        finally:
+            h.close()
+    except Exception:  # noqa: BLE001 - HEAD failure means the size is unknown.
         return 0
 
 
@@ -223,18 +238,18 @@ def find_event(query: str) -> tuple[str, str]:
         parsed = urlparse(cleaned)
         if parsed.scheme not in ("http", "https") or parsed.hostname not in ("hltv.org", "www.hltv.org"):
             raise ValueError("event URL must use the hltv.org host")
-        direct = re.fullmatch(r"/events/(\d+)/([a-z0-9-]+)/?", parsed.path, re.I)
+        direct = re.fullmatch(r"/events/(\d+)/([a-z0-9-]+)/?", parsed.path, re.IGNORECASE)
         if not direct:
             raise ValueError("expected an HLTV event URL like https://www.hltv.org/events/1234/event-slug")
         return direct.group(1), direct.group(2).lower()
-    direct = re.fullmatch(r"/?events/(\d+)/([a-z0-9-]+)/?", cleaned, re.I)
+    direct = re.fullmatch(r"/?events/(\d+)/([a-z0-9-]+)/?", cleaned, re.IGNORECASE)
     if direct:
         return direct.group(1), direct.group(2).lower()
     if not cleaned:
         raise ValueError("event is required; pass an HLTV event URL, name, or slug")
     r = _get(f"{BASE}/search?query={quote_plus(cleaned)}")
     candidates = list(dict.fromkeys(re.findall(
-        r'href="/events/(\d+)/([a-z0-9-]+)"', r.text, re.I
+        r'href="/events/(\d+)/([a-z0-9-]+)"', r.text, re.IGNORECASE
     )))
     r.close()
     if not candidates:
@@ -307,7 +322,12 @@ def resolve_demo(demo_path: str) -> dict:
     r.close()
     if not loc:
         raise RuntimeError(f"demo {demo_path}: no redirect (HLTV may require login now)")
-    return {"r2": loc, "name": loc.rsplit("/", 1)[-1], "size": _head_size(loc)}
+    _validate_demo_url(loc)
+    parsed = urlparse(loc)
+    name = parsed.path.rsplit("/", 1)[-1]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,240}\.(?:rar|7z|zip)", name, re.IGNORECASE):
+        raise RuntimeError(f"unsafe demo archive filename: {name!r}")
+    return {"r2": loc, "name": name, "size": _head_size(loc)}
 
 
 def _manifest() -> dict:
@@ -337,10 +357,8 @@ def _save_manifest(m: dict) -> None:
 
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress:
-        try:
+        with suppress(Exception):  # Progress rendering must never abort a download.
             progress(message)
-        except Exception:
-            pass  # Progress rendering must never abort a download.
 
 
 def _require_space(path: str, needed: int, purpose: str) -> None:
@@ -365,13 +383,16 @@ def download(r2: str, size: int, dest: str, progress: Callable[[str], None] | No
         offset = 0
     headers = {"Range": f"bytes={offset}-"} if offset else {}
     t0 = time.time()
-    r = cr.get(r2, impersonate="chrome", timeout=(30, 3600), stream=True, headers=headers)
+    _validate_demo_url(r2)
+    r = cr.get(r2, impersonate="chrome", timeout=(30, 3600), stream=True,
+               headers=headers, allow_redirects=False)
     try:
+        _validate_demo_url(str(r.url))
         if r.status_code not in (200, 206):
             raise RuntimeError(f"download http {r.status_code}")
         if offset and r.status_code == 206:
             content_range = r.headers.get("content-range", "")
-            if not re.match(rf"bytes\s+{offset}-\d+/", content_range, re.I):
+            if not re.match(rf"bytes\s+{offset}-\d+/", content_range, re.IGNORECASE):
                 raise RuntimeError(f"invalid resume response: {content_range!r}")
         mode = "ab" if (offset and r.status_code == 206) else "wb"
         got = offset if mode == "ab" else 0
@@ -397,7 +418,8 @@ def download(r2: str, size: int, dest: str, progress: Callable[[str], None] | No
 def archive_demos(rar: str) -> list[dict]:
     """List demo members and their uncompressed sizes using 7-Zip's stable format."""
     out = subprocess.run(
-        [ensure_7zz(), "l", "-slt", rar], capture_output=True, text=True, timeout=300
+        [ensure_7zz(), "l", "-slt", rar], capture_output=True, text=True, timeout=300,
+        check=False,
     )
     if out.returncode != 0:
         raise RuntimeError(f"cannot list archive: {(out.stderr or out.stdout)[-160:]}")
@@ -429,7 +451,9 @@ def archive_demos(rar: str) -> list[dict]:
 
 
 def test_archive(rar: str) -> None:
-    result = subprocess.run([ensure_7zz(), "t", rar], capture_output=True, text=True, timeout=900)
+    result = subprocess.run(
+        [ensure_7zz(), "t", rar], capture_output=True, text=True, timeout=900, check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"archive integrity test failed: {(result.stderr or result.stdout)[-160:]}")
 
@@ -463,7 +487,7 @@ def extract(rar: str, maps_wanted: list[str], csgo: str) -> list[dict]:
         with tempfile.TemporaryDirectory(prefix="hltv-demo-", dir=csgo) as tmp:
             # `e` discards archive paths, preventing path traversal outside tmp.
             res = subprocess.run([ensure_7zz(), "e", "-y", rar, "-o" + tmp, member],
-                                 capture_output=True, text=True, timeout=900)
+                                 capture_output=True, text=True, timeout=900, check=False)
             candidate = os.path.join(tmp, name)
             actual = os.path.getsize(candidate) if os.path.isfile(candidate) else 0
             if res.returncode != 0 or actual == 0 or (expected and actual != expected):
@@ -504,90 +528,115 @@ def _completed_from_manifest(entry: dict, maps_wanted: list[str], csgo: str) -> 
     return valid
 
 
-def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = True,
-         dry_run: bool = False, csgo_dir: str = "", download_dir: str = "",
-         allow_unknown_size: bool = False,
-         progress: Callable[[str], None] | None = None) -> dict:
+def _build_download_plan(event: str, maps: str = "", latest: int = 0,
+                         keep_rars: bool = True, csgo_dir: str = "",
+                         download_dir: str = "", progress: Callable[[str], None] | None = None,
+                         allow_unbounded_preview: bool = False) -> dict:
+    """Resolve a stable match/archive selection without modifying local state."""
     if not event:
-        return {"error": "event is required, e.g. event='blast-open-porto-2026'"}
+        raise ValueError("event is required")
     if latest < 0:
-        return {"error": "latest must be 0 or greater"}
+        raise ValueError("latest must be 0 or greater")
     wanted = resolve_maps(maps) if maps else []
     eid, slug = find_event(event)
-    _emit(progress, f"Resolved event: {BASE}/events/{eid}/{slug}")
+    event_url = f"{BASE}/events/{eid}/{slug}"
+    _emit(progress, f"Resolved event: {event_url}")
     results = list_results(eid)
     _emit(progress, f"Found {len(results)} result(s); scanning played maps")
 
     selected = []
-    for index, m in enumerate(results, 1):
-        _emit(progress, f"Scanning match {index}/{len(results)}: {m['teams']}")
-        played, demo_path = fetch_match_page(m["path"]) if wanted else ([], None)
-        m["played"], m["demo_path"] = played, demo_path
+    for index, match in enumerate(results, 1):
+        _emit(progress, f"Scanning match {index}/{len(results)}: {match['teams']}")
+        played, demo_path = fetch_match_page(match["path"]) if wanted else ([], None)
+        match["played"], match["demo_path"] = played, demo_path
         if wanted:
-            hit = [w for w in wanted if w in played]
+            hit = [name for name in wanted if name in played]
             if hit:
-                m["hit"] = hit
-                selected.append(m)
+                match["hit"] = hit
+                selected.append(match)
         else:
-            selected.append(m)
+            selected.append(match)
         if wanted and latest and len(selected) >= latest:
             break
         time.sleep(0.4)
     if latest and not wanted:
         selected = selected[:latest]
 
-    if not wanted and not latest and not dry_run:
+    if not wanted and not latest and not allow_unbounded_preview:
         return {
-            "event": f"{eid}/{slug}", "mode": "refused",
+            "event": f"{eid}/{slug}", "event_url": event_url, "mode": "refused",
             "note": "maps= is empty and latest=0: this would download EVERY match archive. "
-                    "Pass maps='...' and/or latest=N, or dry_run=True to inspect first.",
-            "all_matches": [m["teams"] for m in results],
+                    "Pass maps='...' and/or latest=N, or use a dry run to inspect first.",
+            "all_matches": [match["teams"] for match in results],
+            "wanted": wanted, "plan": [], "keep_rars": keep_rars,
+            "csgo_config": csgo_dir, "download_config": download_dir,
         }
 
     plan = []
-    for m in selected:
+    for match in selected:
         entry = {}
         try:
-            demo_path = m.get("demo_path")
+            demo_path = match.get("demo_path")
             if demo_path is None:
-                _, demo_path = fetch_match_page(m["path"])
+                _, demo_path = fetch_match_page(match["path"])
             if demo_path:
                 entry.update(resolve_demo(demo_path))
                 entry["demo_id"] = demo_path.rsplit("/", 1)[-1]
             else:
                 entry["error"] = "no demo link on match page"
-        except Exception as e:  # noqa: BLE001
-            entry["error"] = str(e)[:120]
-        plan.append({**m, **entry})
+        except Exception as exc:  # noqa: BLE001
+            entry["error"] = str(exc)[:200]
+        plan.append({**match, **entry})
+    return {
+        "event": f"{eid}/{slug}", "event_url": event_url, "wanted": wanted,
+        "plan": plan, "keep_rars": keep_rars, "csgo_config": csgo_dir,
+        "download_config": download_dir,
+    }
 
-    if dry_run:
-        try:
-            found_csgo = discover_csgo(csgo_dir)
-        except RuntimeError:
-            found_csgo = None
-        prospective_download = os.path.abspath(os.path.expanduser(
-            download_dir or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
-        ))
-        return {
-            "event": f"{eid}/{slug}", "event_url": f"{BASE}/events/{eid}/{slug}",
-            "csgo_dir": found_csgo, "download_dir": prospective_download, "mode": "dry-run",
-            **({"error": "no matches matched the requested filters"} if not plan else {}),
-            "maps": wanted, "matches": [
-                {k: v for k, v in item.items()
-                 if k in ("teams", "score", "played", "hit", "name", "size", "demo_id", "error")}
-                for item in plan
-            ],
-            "total_mb": round(sum(item.get("size", 0) for item in plan) / 1e6, 1),
-            "errors": [{"teams": item["teams"], "error": item["error"]}
-                       for item in plan if item.get("error")],
-        }
 
+def _public_download_plan(prepared: dict) -> dict:
+    try:
+        found_csgo = prepared.get("resolved_csgo") or discover_csgo(prepared["csgo_config"])
+    except RuntimeError:
+        found_csgo = None
+    prospective_download = prepared.get("resolved_download") or os.path.abspath(os.path.expanduser(
+        prepared["download_config"] or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
+    ))
+    plan = prepared["plan"]
+    result = {
+        "event": prepared["event"], "event_url": prepared["event_url"],
+        "csgo_dir": found_csgo, "download_dir": prospective_download, "mode": "dry-run",
+        "maps": prepared["wanted"],
+        "keep_rars": prepared["keep_rars"],
+        "matches": [
+            {key: value for key, value in item.items()
+             if key in ("teams", "score", "played", "hit", "name", "size", "demo_id", "error")}
+            for item in plan
+        ],
+        "total_bytes": sum(item.get("size", 0) for item in plan),
+        "total_mb": round(sum(item.get("size", 0) for item in plan) / 1e6, 1),
+        "errors": [{"teams": item["teams"], "error": item["error"]}
+                   for item in plan if item.get("error")],
+    }
     if not plan:
-        return {"event": f"{eid}/{slug}", "error": "no matches matched the requested filters"}
+        result["error"] = "no matches matched the requested filters"
+    return result
 
-    csgo = discover_csgo(csgo_dir)
-    dl_dir = os.path.abspath(os.path.expanduser(
-        download_dir or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
+
+def _execute_download_plan(prepared: dict, allow_unknown_size: bool = False,
+                           progress: Callable[[str], None] | None = None) -> dict:
+    """Execute exactly the demo IDs and URLs frozen in ``prepared``; never rediscover matches."""
+    if prepared.get("mode") == "refused":
+        return {key: value for key, value in prepared.items()
+                if key in ("event", "event_url", "mode", "note", "all_matches")}
+    plan = prepared["plan"]
+    if not plan:
+        return {"event": prepared["event"], "error": "no matches matched the requested filters"}
+    csgo = prepared.get("resolved_csgo") or discover_csgo(prepared["csgo_config"])
+    if not os.path.isdir(csgo) or not os.access(csgo, os.W_OK):
+        raise RuntimeError(f"approved CS2 directory is no longer writable: {csgo}")
+    dl_dir = prepared.get("resolved_download") or os.path.abspath(os.path.expanduser(
+        prepared["download_config"] or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
     ))
     os.makedirs(dl_dir, exist_ok=True)
     if not os.access(dl_dir, os.W_OK):
@@ -595,6 +644,8 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
     _emit(progress, f"Download directory: {dl_dir}")
     _emit(progress, f"CS2 demo directory: {csgo}")
     man = _manifest()
+    wanted = prepared["wanted"]
+    keep_rars = prepared["keep_rars"]
     extracted, downloaded, skipped, errors = [], [], [], []
 
     for item in plan:
@@ -608,10 +659,10 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
         if not item.get("size") and not allow_unknown_size:
             errors.append({
                 "teams": item["teams"],
-                "error": "archive size is unknown; retry later or explicitly use --allow-unknown-size",
+                "error": "archive size is unknown; retry later or explicitly allow unknown size",
             })
             continue
-        hit_maps = [w for w in wanted if w in item.get("played", [])] if wanted else []
+        hit_maps = [name for name in wanted if name in item.get("played", [])] if wanted else []
         prior = man.get(demo_id, {})
         complete = _completed_from_manifest(prior, hit_maps, csgo)
         if complete:
@@ -621,12 +672,14 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
             skipped.append(f"{item['teams']} (verified from manifest)")
             continue
 
-        dest = os.path.join(dl_dir, item["name"])
+        dest = os.path.realpath(os.path.join(dl_dir, item["name"]))
+        if os.path.commonpath([os.path.realpath(dl_dir), dest]) != os.path.realpath(dl_dir):
+            errors.append({"teams": item["teams"], "error": "archive destination escaped download directory"})
+            continue
         try:
             if os.path.isfile(dest) and item["size"] and os.path.getsize(dest) == item["size"]:
                 skipped.append(f"{item['teams']} (archive on disk)")
             else:
-                # Only adopt the exact archive recorded for this demo ID. Equal size alone is unsafe.
                 recorded = prior.get("rar", "")
                 if (recorded and os.path.isfile(recorded) and item["size"]
                         and os.path.getsize(recorded) == item["size"]):
@@ -667,29 +720,41 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
                 "teams": item["teams"], "rar": dest, "size": item["size"],
                 "archive_demos": [member["file"] for member in members],
                 "extracted_files": recorded_files,
-                "maps_extracted": sorted(recorded_files),  # backward-readable summary
+                "maps_extracted": sorted(recorded_files),
                 "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             })
             man[demo_id] = entry
             _save_manifest(man)
-            # Delete only after every requested member was validated and the manifest was saved.
             if not keep_rars and os.path.isfile(dest):
                 os.remove(dest)
-        except Exception as e:  # noqa: BLE001
-            errors.append({"teams": item["teams"], "error": str(e)[:200]})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"teams": item["teams"], "error": str(exc)[:200]})
 
     return {
-        "event": f"{eid}/{slug}", "event_url": f"{BASE}/events/{eid}/{slug}",
+        "event": prepared["event"], "event_url": prepared["event_url"],
         "csgo_dir": csgo, "download_dir": dl_dir, "maps": wanted,
         "selected_matches": [item["teams"] for item in plan],
-        "downloaded": downloaded, "skipped": skipped,
-        "extracted": extracted,
+        "downloaded": downloaded, "skipped": skipped, "extracted": extracted,
         "playdemo_commands": [f'playdemo "{result["playdemo"]}"'
                               for result in extracted if "playdemo" in result],
         "errors": errors,
         "total_demos_in_csgo": len([name for name in os.listdir(csgo)
                                     if name.lower().endswith(".dem")]),
     }
+
+
+def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = True,
+         dry_run: bool = False, csgo_dir: str = "", download_dir: str = "",
+         allow_unknown_size: bool = False,
+         progress: Callable[[str], None] | None = None) -> dict:
+    prepared = _build_download_plan(
+        event=event, maps=maps, latest=latest, keep_rars=keep_rars,
+        csgo_dir=csgo_dir, download_dir=download_dir, progress=progress,
+        allow_unbounded_preview=dry_run,
+    )
+    if dry_run:
+        return _public_download_plan(prepared)
+    return _execute_download_plan(prepared, allow_unknown_size=allow_unknown_size, progress=progress)
 
 
 async def run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = True,

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+SELF="$(readlink -f -- "${BASH_SOURCE[0]}")" || true
+[[ -n "$SELF" ]] || { printf '%s\n' 'Broken hltv-demos MCP launcher.' >&2; exit 1; }
+SKILL_DIR="$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
+PYTHON="$SKILL_DIR/../venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+  PYTHON="$DATA_HOME/hltv-demos/current/venv/bin/python"
+fi
+[[ -x "$PYTHON" ]] || {
+  printf 'MCP adapter is not installed. Run %s/install first.\n' "$(dirname -- "$SELF")" >&2
+  exit 1
+}
+exec "$PYTHON" -m hltv_demos.mcp_server "$@"
