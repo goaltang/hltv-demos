@@ -9,13 +9,19 @@ played-state must be checked per match page.
 """
 import asyncio
 import glob
+import hashlib
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
+from typing import Callable
+from urllib.parse import quote_plus, urlparse
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cr
@@ -24,6 +30,8 @@ BASE = "https://www.hltv.org"
 WORK = os.path.expanduser("~/tools/hltv-demos")
 MANIFEST = os.path.join(WORK, "manifest.json")
 SEVENZ = os.path.join(WORK, "7zz")
+SEVENZ_URL = "https://www.7-zip.org/a/7z2501-linux-x64.tar.xz"
+SEVENZ_SHA256 = "4ca3b7c6f2f67866b92622818b58233dc70367be2f36b498eb0bdeaaa44b53f4"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 # Chinese -> HLTV display names (case-insensitive lookup also covers English)
@@ -80,56 +88,172 @@ def _head_size(url: str) -> int:
         return 0
 
 
+def _supported_platform() -> tuple[bool, str]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    ok = system == "linux" and machine in ("x86_64", "amd64")
+    return ok, f"{system}/{machine}"
+
+
 def ensure_7zz() -> str:
+    system_7z = shutil.which("7zz") or shutil.which("7z")
+    if system_7z:
+        return system_7z
     if os.path.exists(SEVENZ) and os.access(SEVENZ, os.X_OK):
         return SEVENZ
-    os.makedirs(WORK, exist_ok=True)
-    url = "https://www.7-zip.org/a/7z2501-linux-x64.tar.xz"
-    tar = os.path.join(WORK, "7z.tar.xz")
-    r = _get(url)
-    with open(tar, "wb") as f:
-        f.write(r.content)
+    supported, label = _supported_platform()
+    if not supported:
+        raise RuntimeError(
+            f"automatic 7-Zip setup supports Linux x86-64/WSL2 only (detected {label}). "
+            "Install 7zz/7z yourself and put it on PATH."
+        )
+    os.makedirs(WORK, mode=0o700, exist_ok=True)
+    archive_path = os.path.join(WORK, "7z.tar.xz")
+    r = _get(SEVENZ_URL)
+    payload = r.content
     r.close()
-    subprocess.run(["tar", "-xf", tar, "-C", WORK, "7zz"], check=True)
-    os.chmod(SEVENZ, 0o755)
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != SEVENZ_SHA256:
+        raise RuntimeError(
+            f"7-Zip checksum mismatch: got {digest}, expected {SEVENZ_SHA256}; nothing executed"
+        )
+    with open(archive_path, "wb") as f:
+        f.write(payload)
+    with tarfile.open(archive_path, "r:xz") as archive:
+        member = archive.getmember("7zz")
+        source = archive.extractfile(member)
+        if source is None or not member.isfile():
+            raise RuntimeError("verified 7-Zip archive does not contain a regular 7zz file")
+        fd, tmp = tempfile.mkstemp(prefix="7zz-", dir=WORK)
+        try:
+            with os.fdopen(fd, "wb") as target:
+                shutil.copyfileobj(source, target)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, SEVENZ)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return SEVENZ
 
 
-def discover_csgo(explicit: str = "") -> str:
-    cands = []
+def _csgo_candidates(explicit: str = "") -> list[str]:
+    values = []
     if explicit:
-        cands.append(explicit)
+        values.append(explicit)
     env = os.environ.get("HLTV_DEMOS_CSGO_DIR")
     if env:
-        cands.append(env)
-    cands += [
+        values.append(env)
+    values += [
         "/mnt/d/steam/steamapps/common/Counter-Strike Global Offensive",
         "/mnt/c/Program Files (x86)/Steam/steamapps/common/Counter-Strike Global Offensive",
         os.path.expanduser("~/.steam/steam/steamapps/common/Counter-Strike Global Offensive"),
         os.path.expanduser("~/.local/share/Steam/steamapps/common/Counter-Strike Global Offensive"),
     ]
-    for root in glob.glob("/mnt/*/steamapps/common/Counter-Strike Global Offensive"):
-        cands.append(root)
-    for c in cands:
-        demo_dir = os.path.join(c.rstrip("/"), "game", "csgo")
+    values += glob.glob("/mnt/*/steamapps/common/Counter-Strike Global Offensive")
+    out = []
+    for value in values:
+        path = os.path.abspath(os.path.expanduser(value.rstrip("/\\")))
+        # Accept either the game root or the final game/csgo directory.
+        if os.path.basename(path).lower() == "csgo" and os.path.basename(os.path.dirname(path)).lower() == "game":
+            demo_dir = path
+        else:
+            demo_dir = os.path.join(path, "game", "csgo")
+        if demo_dir not in out:
+            out.append(demo_dir)
+    return out
+
+
+def discover_csgo(explicit: str = "") -> str:
+    for demo_dir in _csgo_candidates(explicit):
         if os.path.isdir(demo_dir) and os.access(demo_dir, os.W_OK):
             return demo_dir
     raise RuntimeError(
-        "CS2 game/csgo dir not found (or not writable). Pass csgo_dir='<CS2 root>' "
-        "or set env HLTV_DEMOS_CSGO_DIR to the 'Counter-Strike Global Offensive' root.")
+        "CS2 game/csgo directory was not found or is not writable. Pass either the game root "
+        "or the final game/csgo path with --csgo-dir, or set HLTV_DEMOS_CSGO_DIR."
+    )
+
+
+def _existing_parent(path: str) -> str:
+    current = os.path.abspath(os.path.expanduser(path))
+    while not os.path.exists(current):
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return current
+
+
+def doctor(csgo_dir: str = "", download_dir: str = "") -> dict:
+    supported, platform_label = _supported_platform()
+    python_ok = tuple(map(int, platform.python_version_tuple()[:2])) >= (3, 10)
+    system_seven = shutil.which("7zz") or shutil.which("7z")
+    bundled_seven = SEVENZ if os.path.isfile(SEVENZ) and os.access(SEVENZ, os.X_OK) else None
+    seven_value = system_seven or bundled_seven
+    try:
+        csgo = discover_csgo(csgo_dir)
+        csgo_ok, csgo_note = True, csgo
+    except RuntimeError as exc:
+        csgo_ok, csgo_note = False, str(exc)
+    work_parent = _existing_parent(WORK)
+    work_ok = os.path.isdir(work_parent) and os.access(work_parent, os.W_OK)
+    requested_download = os.path.abspath(os.path.expanduser(
+        download_dir or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
+    ))
+    download_parent = _existing_parent(requested_download)
+    download_ok = os.path.isdir(download_parent) and os.access(download_parent, os.W_OK)
+    return {
+        "ok": supported and python_ok and csgo_ok and work_ok and download_ok,
+        "platform": {"ok": supported, "value": platform_label,
+                     "note": "supported" if supported else "auto-setup supports Linux x86-64/WSL2 only"},
+        "python": {"ok": python_ok, "value": platform.python_version()},
+        "seven_zip": {"ok": bool(seven_value), "value": seven_value,
+                      "note": "available" if seven_value else
+                              "optional now; a checksum-verified copy is downloaded before first extraction"},
+        "csgo_dir": {"ok": csgo_ok, "value": csgo_note},
+        "download_dir": {"ok": download_ok, "value": requested_download,
+                         "note": f"writable parent: {download_parent}"},
+        "work_dir": {"ok": work_ok, "value": WORK,
+                     "note": f"writable parent: {work_parent}"},
+    }
 
 
 def find_event(query: str) -> tuple[str, str]:
-    r = _get(f"{BASE}/search?query={query.strip().replace(' ', '+')}")
-    slugs = re.findall(r'href="/events/(\d+)/([a-z0-9-]+)"', r.text)
+    cleaned = query.strip()
+    if "://" in cleaned:
+        parsed = urlparse(cleaned)
+        if parsed.scheme not in ("http", "https") or parsed.hostname not in ("hltv.org", "www.hltv.org"):
+            raise ValueError("event URL must use the hltv.org host")
+        direct = re.fullmatch(r"/events/(\d+)/([a-z0-9-]+)/?", parsed.path, re.I)
+        if not direct:
+            raise ValueError("expected an HLTV event URL like https://www.hltv.org/events/1234/event-slug")
+        return direct.group(1), direct.group(2).lower()
+    direct = re.fullmatch(r"/?events/(\d+)/([a-z0-9-]+)/?", cleaned, re.I)
+    if direct:
+        return direct.group(1), direct.group(2).lower()
+    if not cleaned:
+        raise ValueError("event is required; pass an HLTV event URL, name, or slug")
+    r = _get(f"{BASE}/search?query={quote_plus(cleaned)}")
+    candidates = list(dict.fromkeys(re.findall(
+        r'href="/events/(\d+)/([a-z0-9-]+)"', r.text, re.I
+    )))
     r.close()
-    if not slugs:
+    if not candidates:
         raise RuntimeError(f"no HLTV event found for {query!r}")
-    want = re.sub(r"[^a-z0-9]", "", query.lower())
-    for eid, slug in slugs:
-        if want and want in re.sub(r"[^a-z0-9]", "", slug):
-            return eid, slug
-    return slugs[0]
+    want = re.sub(r"[^a-z0-9]", "", cleaned.lower())
+    exact = [(eid, slug) for eid, slug in candidates
+             if want == re.sub(r"[^a-z0-9]", "", slug.lower())]
+    if len(exact) == 1:
+        return exact[0]
+    close = [(eid, slug) for eid, slug in candidates
+             if want and want in re.sub(r"[^a-z0-9]", "", slug.lower())]
+    if len(close) == 1:
+        return close[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    choices = ", ".join(f"{BASE}/events/{eid}/{slug}" for eid, slug in candidates[:5])
+    raise RuntimeError(
+        f"event name {query!r} is ambiguous. Use one exact HLTV event URL. Candidates: {choices}"
+    )
 
 
 def list_results(event_id: str) -> list[dict]:
@@ -210,7 +334,27 @@ def _save_manifest(m: dict) -> None:
             os.remove(tmp)
 
 
-def download(r2: str, size: int, dest: str) -> str:
+
+def _emit(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress:
+        try:
+            progress(message)
+        except Exception:
+            pass  # Progress rendering must never abort a download.
+
+
+def _require_space(path: str, needed: int, purpose: str) -> None:
+    if needed <= 0:
+        return
+    free = shutil.disk_usage(path).free
+    reserve = max(256 * 1024 * 1024, needed // 10)
+    if free < needed + reserve:
+        raise RuntimeError(
+            f"not enough free space for {purpose}: need about {(needed + reserve) / 1e9:.2f} GB, "
+            f"have {free / 1e9:.2f} GB at {path}"
+        )
+
+def download(r2: str, size: int, dest: str, progress: Callable[[str], None] | None = None) -> str:
     part = dest + ".part"
     offset = os.path.getsize(part) if os.path.exists(part) else 0
     if size and offset == size:
@@ -231,11 +375,17 @@ def download(r2: str, size: int, dest: str) -> str:
                 raise RuntimeError(f"invalid resume response: {content_range!r}")
         mode = "ab" if (offset and r.status_code == 206) else "wb"
         got = offset if mode == "ab" else 0
+        last_report = t0
         with open(part, mode) as f:
             for chunk in r.iter_content(1024 * 512):
                 if chunk:
                     f.write(chunk)
                     got += len(chunk)
+                    now = time.time()
+                    if progress and now - last_report >= 1:
+                        total = f"/{size / 1e6:.0f} MB" if size else " MB"
+                        _emit(progress, f"Downloaded {got / 1e6:.0f}{total}")
+                        last_report = now
     finally:
         r.close()
     if size and got != size:
@@ -265,8 +415,12 @@ def archive_demos(rar: str) -> list[dict]:
                     member_size = int(current.get("Size", "0"))
                 except ValueError:
                     member_size = 0
-                demos.append({"member": path, "file": os.path.basename(normalized),
-                              "size": member_size})
+                filename = os.path.basename(normalized)
+                if member_size <= 0:
+                    raise RuntimeError(f"demo member has invalid size: {path!r} ({member_size})")
+                if any(item["file"].casefold() == filename.casefold() for item in demos):
+                    raise RuntimeError(f"archive has duplicate demo basename: {filename!r}")
+                demos.append({"member": path, "file": filename, "size": member_size})
             current = {}
         elif " = " in line:
             key, value = line.split(" = ", 1)
@@ -351,17 +505,22 @@ def _completed_from_manifest(entry: dict, maps_wanted: list[str], csgo: str) -> 
 
 
 def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = True,
-         dry_run: bool = False, csgo_dir: str = "") -> dict:
+         dry_run: bool = False, csgo_dir: str = "", download_dir: str = "",
+         allow_unknown_size: bool = False,
+         progress: Callable[[str], None] | None = None) -> dict:
     if not event:
         return {"error": "event is required, e.g. event='blast-open-porto-2026'"}
     if latest < 0:
         return {"error": "latest must be 0 or greater"}
     wanted = resolve_maps(maps) if maps else []
     eid, slug = find_event(event)
+    _emit(progress, f"Resolved event: {BASE}/events/{eid}/{slug}")
     results = list_results(eid)
+    _emit(progress, f"Found {len(results)} result(s); scanning played maps")
 
     selected = []
-    for m in results:
+    for index, m in enumerate(results, 1):
+        _emit(progress, f"Scanning match {index}/{len(results)}: {m['teams']}")
         played, demo_path = fetch_match_page(m["path"]) if wanted else ([], None)
         m["played"], m["demo_path"] = played, demo_path
         if wanted:
@@ -406,21 +565,35 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
             found_csgo = discover_csgo(csgo_dir)
         except RuntimeError:
             found_csgo = None
+        prospective_download = os.path.abspath(os.path.expanduser(
+            download_dir or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
+        ))
         return {
-            "event": f"{eid}/{slug}", "csgo_dir": found_csgo, "mode": "dry-run",
+            "event": f"{eid}/{slug}", "event_url": f"{BASE}/events/{eid}/{slug}",
+            "csgo_dir": found_csgo, "download_dir": prospective_download, "mode": "dry-run",
+            **({"error": "no matches matched the requested filters"} if not plan else {}),
             "maps": wanted, "matches": [
                 {k: v for k, v in item.items()
                  if k in ("teams", "score", "played", "hit", "name", "size", "demo_id", "error")}
                 for item in plan
             ],
             "total_mb": round(sum(item.get("size", 0) for item in plan) / 1e6, 1),
+            "errors": [{"teams": item["teams"], "error": item["error"]}
+                       for item in plan if item.get("error")],
         }
 
+    if not plan:
+        return {"event": f"{eid}/{slug}", "error": "no matches matched the requested filters"}
+
     csgo = discover_csgo(csgo_dir)
-    dl_dir = os.environ.get("HLTV_DEMOS_DL_DIR") or next(
-        (path for path in sorted(glob.glob("/mnt/*/Downloads")) if os.path.isdir(path)),
-        os.path.expanduser("~/Downloads"))
+    dl_dir = os.path.abspath(os.path.expanduser(
+        download_dir or os.environ.get("HLTV_DEMOS_DL_DIR") or "~/Downloads"
+    ))
     os.makedirs(dl_dir, exist_ok=True)
+    if not os.access(dl_dir, os.W_OK):
+        raise RuntimeError(f"download directory is not writable: {dl_dir}")
+    _emit(progress, f"Download directory: {dl_dir}")
+    _emit(progress, f"CS2 demo directory: {csgo}")
     man = _manifest()
     extracted, downloaded, skipped, errors = [], [], [], []
 
@@ -428,7 +601,16 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
         if not item.get("r2"):
             errors.append({"teams": item["teams"], "error": item.get("error", "no demo url")})
             continue
-        demo_id = item.get("demo_id", "?")
+        demo_id = item.get("demo_id")
+        if not demo_id:
+            errors.append({"teams": item["teams"], "error": "missing HLTV demo ID"})
+            continue
+        if not item.get("size") and not allow_unknown_size:
+            errors.append({
+                "teams": item["teams"],
+                "error": "archive size is unknown; retry later or explicitly use --allow-unknown-size",
+            })
+            continue
         hit_maps = [w for w in wanted if w in item.get("played", [])] if wanted else []
         prior = man.get(demo_id, {})
         complete = _completed_from_manifest(prior, hit_maps, csgo)
@@ -441,7 +623,7 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
 
         dest = os.path.join(dl_dir, item["name"])
         try:
-            if os.path.isfile(dest) and (not item["size"] or os.path.getsize(dest) == item["size"]):
+            if os.path.isfile(dest) and item["size"] and os.path.getsize(dest) == item["size"]:
                 skipped.append(f"{item['teams']} (archive on disk)")
             else:
                 # Only adopt the exact archive recorded for this demo ID. Equal size alone is unsafe.
@@ -451,15 +633,24 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
                     dest = recorded
                     skipped.append(f"{item['teams']} (archive from manifest)")
                 else:
-                    note = download(item["r2"], item["size"], dest)
+                    part_size = os.path.getsize(dest + ".part") if os.path.exists(dest + ".part") else 0
+                    remaining = (item["size"] - part_size
+                                 if item["size"] and part_size <= item["size"] else item["size"])
+                    _require_space(dl_dir, remaining, f"archive for {item['teams']}")
+                    _emit(progress, f"Downloading: {item['teams']}")
+                    note = download(item["r2"], item["size"], dest, progress=progress)
                     downloaded.append(f"{item['teams']}: {note}")
 
+            _emit(progress, f"Testing archive: {item['teams']}")
             members = archive_demos(dest)
             targets = _wanted_members(members, hit_maps)
             if not targets:
                 label = ", ".join(hit_maps) if hit_maps else "any map"
                 raise RuntimeError(f"archive contains no demo for {label}")
+            _require_space(csgo, sum(target["size"] for target in targets),
+                           f"extracted demos for {item['teams']}")
             test_archive(dest)
+            _emit(progress, f"Extracting {len(targets)} demo(s): {item['teams']}")
             got = extract(dest, hit_maps, csgo)
             if len(got) != len(targets):
                 raise RuntimeError(f"extracted {len(got)} of {len(targets)} expected demos")
@@ -488,7 +679,8 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
             errors.append({"teams": item["teams"], "error": str(e)[:200]})
 
     return {
-        "event": f"{eid}/{slug}", "csgo_dir": csgo, "maps": wanted,
+        "event": f"{eid}/{slug}", "event_url": f"{BASE}/events/{eid}/{slug}",
+        "csgo_dir": csgo, "download_dir": dl_dir, "maps": wanted,
         "selected_matches": [item["teams"] for item in plan],
         "downloaded": downloaded, "skipped": skipped,
         "extracted": extracted,
@@ -501,7 +693,9 @@ def _run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = Tru
 
 
 async def run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool = True,
-              dry_run: bool = False, csgo_dir: str = "") -> dict:
+              dry_run: bool = False, csgo_dir: str = "", download_dir: str = "",
+              allow_unknown_size: bool = False,
+              progress: Callable[[str], None] | None = None) -> dict:
     """Download and install HLTV demos without blocking the caller's event loop.
 
     Empty ``maps`` means every demo in each selected match archive. To prevent an
@@ -511,5 +705,6 @@ async def run(event: str = "", maps: str = "", latest: int = 0, keep_rars: bool 
     """
     return await asyncio.to_thread(
         _run, event=event, maps=maps, latest=latest, keep_rars=keep_rars,
-        dry_run=dry_run, csgo_dir=csgo_dir,
+        dry_run=dry_run, csgo_dir=csgo_dir, download_dir=download_dir,
+        allow_unknown_size=allow_unknown_size, progress=progress,
     )

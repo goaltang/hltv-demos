@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+SELF="$(readlink -f -- "${BASH_SOURCE[0]}")" || true
+[[ -n "$SELF" ]] || { printf '%s\n' 'Broken hltv-demos launcher.' >&2; exit 1; }
+SKILL_DIR="$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd -P)"
+COMMAND="$SKILL_DIR/../venv/bin/hltv_demos"
+if [[ ! -x "$COMMAND" ]]; then
+  DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+  COMMAND="$DATA_HOME/hltv-demos/current/venv/bin/hltv_demos"
+fi
+[[ -x "$COMMAND" ]] || {
+  printf 'hltv-demos is not installed. Run %s/install first.\n' "$(dirname -- "$SELF")" >&2
+  exit 1
+}
+exec "$COMMAND" "$@"

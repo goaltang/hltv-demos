@@ -95,5 +95,46 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(result["csgo_dir"])
 
 
+class V03SafetyTests(unittest.TestCase):
+    def test_discover_accepts_final_game_csgo_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            csgo = Path(d, "game", "csgo")
+            csgo.mkdir(parents=True)
+            self.assertEqual(hd.discover_csgo(str(csgo)), str(csgo))
+
+    @patch.object(hd, "_get")
+    def test_event_url_does_not_search(self, get):
+        self.assertEqual(hd.find_event("https://www.hltv.org/events/1234/my-event"), ("1234", "my-event"))
+        get.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "hltv.org"):
+            hd.find_event("https://hltv.org.evil.test/events/1234/my-event")
+
+    @patch.object(hd, "_get")
+    def test_ambiguous_event_fails_closed(self, get):
+        get.return_value = Mock(text=(
+            'href="/events/1/foo-one" href="/events/2/foo-two"'
+        ), close=Mock())
+        with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            hd.find_event("foo")
+
+    @patch.object(hd, "_get")
+    @patch.object(hd, "_supported_platform", return_value=(True, "linux/x86_64"))
+    @patch.object(hd.shutil, "which", return_value=None)
+    def test_7zip_checksum_mismatch_is_not_executed(self, _which, _platform, get):
+        response = Mock(content=b"not the official archive", close=Mock())
+        get.return_value = response
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(hd, "WORK", d), patch.object(hd, "SEVENZ", str(Path(d, "7zz"))):
+            with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+                hd.ensure_7zz()
+            self.assertFalse(Path(d, "7zz").exists())
+
+    def test_disk_guard_reports_shortage(self):
+        usage = Mock(free=100)
+        with patch.object(hd.shutil, "disk_usage", return_value=usage):
+            with self.assertRaisesRegex(RuntimeError, "not enough free space"):
+                hd._require_space("/tmp", 101, "test")
+
+
 if __name__ == "__main__":
     unittest.main()

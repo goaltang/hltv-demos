@@ -1,12 +1,19 @@
 [project]
 name = "hltv-demos"
-version = "0.2.0"
-description = "Download CS2 GOTV demos from HLTV by event and map (Cloudflare-safe, resumable, dedup)"
+version = "0.3.0"
+description = "Safely download and install CS2 GOTV demos from HLTV by event and map"
+readme = "README.md"
+authors = [{ name = "Zhengtao", email = "1399159010@qq.com" }]
+license = "MIT"
 requires-python = ">=3.10"
-dependencies = ["curl_cffi", "beautifulsoup4", "lxml"]
+dependencies = ["curl_cffi>=0.7,<1", "beautifulsoup4>=4.12,<5", "lxml>=5,<7"]
 
 [project.scripts]
-hltv_demos = "hltv_demos.cli:main"
+hltv_demos = "hltv_demos.cli:entrypoint"
+
+[project.urls]
+Repository = "https://github.com/goaltang/hltv-demos"
+Issues = "https://github.com/goaltang/hltv-demos/issues"
 
 [build-system]
 requires = ["hatchling"]

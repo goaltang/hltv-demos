@@ -1,49 +1,88 @@
 # hltv-demos
 
-Download CS2 GOTV demos (`.dem`) from HLTV by event and map, then install them
-into the CS2 `game/csgo` directory, ready for `playdemo`.
+Safe HLTV GOTV demo planning, download, validation, and CS2 installation.
 
-## Features
+[简体中文说明](README.zh-CN.md)
 
-- Finds an HLTV event from its name or slug.
-- Downloads only maps that were **actually played**, not vetoed maps.
-- Uses `curl_cffi` Chrome impersonation for Cloudflare-protected downloads.
-- Resumes interrupted downloads with validated HTTP Range responses.
-- Uses a manifest to skip requested demos that are already installed.
-- Supports English and Chinese map names.
-- Extracts to a temporary directory, validates output, then installs atomically.
-- Tests archive integrity before extraction or optional deletion.
+## Supported platforms
 
-## Install
+Version 0.3 supports **Linux x86-64** and **Windows WSL2** with Python 3.10+.
+Native Windows, macOS, and Linux ARM are not yet auto-supported. A manually
+installed `7z`/`7zz` on `PATH` may work on other platforms, but CS2 discovery
+and those environments are not tested.
 
-Requires Python 3.10+.
+The tool needs outbound HTTPS access and write access to the CS2 `game/csgo`
+directory. It stores state under `~/tools/hltv-demos` and archives in
+`~/Downloads` unless overridden.
 
-```bash
-pip install .
-hltv_demos --help
-```
+## Install for an Agent
 
-## Usage
+Clone the repository, then run:
 
 ```bash
-# Plan only. This does not require a local CS2 installation.
-hltv_demos --event blast-open-porto-2026 --maps Mirage,Inferno --dry-run
-
-# Extract Inferno from the latest three matching matches.
-hltv_demos --event blast-open-porto-2026 --maps 炼狱小镇 --latest 3
-
-# Extract every .dem from the latest three matches.
-hltv_demos --event blast-open-porto-2026 --latest 3
-
-# Delete each archive only after all requested demos pass validation.
-hltv_demos --event blast-open-porto-2026 --maps Mirage --no-keep-rars
+git clone https://github.com/goaltang/hltv-demos.git
+cd hltv-demos
+./scripts/install --agent auto
+./scripts/doctor
 ```
 
-The JSON result includes ready commands such as:
+Select an Agent explicitly when auto-detection is not suitable:
 
-```text
-playdemo "match-name-mirage"
+```bash
+./scripts/install --agent claude
+./scripts/install --agent codex --agent cursor
+./scripts/install --agent all
 ```
+
+Supported user skill roots:
+
+| Agent | Skill root |
+|---|---|
+| Prime Agent | `~/.prime/agent/skills/` |
+| Claude Code | `~/.claude/skills/` |
+| OpenAI Codex | `~/.agents/skills/` |
+| Cursor | `~/.cursor/skills/` |
+| Gemini CLI | `~/.gemini/skills/` |
+
+Agent Skills support varies by client version. For a repository-scoped install,
+link this repository as `hltv-demos` under the client’s project skill directory,
+such as `.agents/skills`, `.claude/skills`, `.cursor/skills`, or
+`.github/skills` where supported.
+
+The installer creates versioned isolated runtimes under
+`~/.local/share/hltv-demos/releases/` and atomically switches a `current`
+link. It never replaces an unrelated existing skill path.
+
+## Safe quick start
+
+First inspect the plan. This does not require a working CS2 installation and
+does not download an archive:
+
+```bash
+./scripts/hltv-demos   --event 'https://www.hltv.org/events/1234/event-slug'   --maps Mirage,Inferno --latest 3 --dry-run
+```
+
+After checking the exact event, matches, sizes, and paths:
+
+```bash
+./scripts/hltv-demos   --event 'https://www.hltv.org/events/1234/event-slug'   --maps Mirage,Inferno --latest 3 --yes
+```
+
+A real CLI run requires `--yes`. Archives are retained by default. Use
+`--no-keep-rars` only if you want validated archives removed after extraction.
+
+Use `--json` for machine-readable output. stdout remains valid JSON; progress
+is sent to stderr.
+
+## Diagnostics
+
+```bash
+./scripts/doctor
+./scripts/doctor --json
+```
+
+`--csgo-dir` accepts either the `Counter-Strike Global Offensive` root or the
+final `game/csgo` directory. Use `--download-dir` to select archive storage.
 
 ## Python API
 
@@ -52,35 +91,40 @@ import asyncio
 from hltv_demos import run
 
 result = asyncio.run(run(
-    event="blast-open-porto-2026",
+    event="https://www.hltv.org/events/1234/event-slug",
     maps="炼狱小镇",
     latest=3,
+    dry_run=True,
 ))
 ```
 
-`run()` moves blocking HTTP, file and 7-Zip work to a worker thread, so awaiting
-it does not block the caller's event loop.
+The Prime Agent runtime may wrap the module as a directly callable skill. Other
+Python environments must call `hltv_demos.run(...)` as shown above.
 
-## Safety and behavior
+## Security and recovery
 
-- `latest=0` means all matching matches.
-- Empty `maps` means all `.dem` members in each selected archive. A real run
-  with both empty `maps` and `latest=0` is refused to prevent an accidental
-  event-wide download. `dry_run=True` is always allowed.
-- Archives are kept by default. Pass `--no-keep-rars` or
-  `keep_rars=False` to delete them after successful validation and extraction.
-- An existing demo with an unexpected size is preserved and reported as a
-  conflict. It is never silently overwritten.
-- Archive reuse is tied to the same HLTV demo ID. Unrelated archives are never
-  adopted merely because their byte sizes match.
-- `csgo_dir` and `HLTV_DEMOS_CSGO_DIR` specify the
-  `Counter-Strike Global Offensive` root. The tool appends `game/csgo`.
-- The download directory can be overridden with `HLTV_DEMOS_DL_DIR`.
-- The manifest is stored at `~/tools/hltv-demos/manifest.json`.
-- `7zz` is downloaded into `~/tools/hltv-demos/` if it is unavailable.
+- The official Linux x86-64 7-Zip archive has a pinned SHA-256 and is verified
+  before its executable is installed.
+- Resumed HTTP responses validate `Content-Range` and final byte length.
+- Archives pass `7zz t` before extraction.
+- Members are extracted into a temporary directory, validated, and atomically
+  installed. Unsafe paths and conflicting existing demos are rejected.
+- Unknown archive sizes are refused unless `--allow-unknown-size` is explicitly
+  supplied.
+- Disk space is checked before archive download and demo extraction.
+- The manifest skips already verified demos. Failed downloads retain `.part`
+  files for a later resume.
 
-## Tests
+## Development
 
 ```bash
+uv sync
 uv run python -m unittest discover -v
+uv build
 ```
+
+Normal tests use mocked HTTP and do not download HLTV archives.
+
+## License
+
+[MIT](LICENSE)
