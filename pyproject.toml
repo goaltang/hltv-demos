@@ -1,0 +1,16 @@
+[project]
+name = "hltv-demos"
+version = "0.1.0"
+description = "Download CS2 GOTV demos from HLTV by event and map (Cloudflare-safe, resumable, dedup)"
+requires-python = ">=3.10"
+dependencies = ["curl_cffi", "beautifulsoup4", "lxml"]
+
+[project.scripts]
+hltv_demos = "hltv_demos.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hltv_demos"]
